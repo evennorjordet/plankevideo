@@ -88,7 +88,7 @@
   .sidebtn:disabled { opacity: 0.3; }
 
   #speedControls {
-    position: absolute; bottom: 130px; left: 0; right: 0;
+    position: absolute; bottom: 190px; left: 0; right: 0;
     display: none;
     justify-content: center; gap: 8px;
     padding: 0 20px;
@@ -102,6 +102,53 @@
     font-size: 13px; font-weight: 600;
   }
   .speedBtn.active { background: #fff; color: #000; }
+
+  #scrubWrap {
+    position: absolute; bottom: 130px; left: 0; right: 0;
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    padding: 0 20px;
+    z-index: 10;
+  }
+  #scrubWrap.show { display: flex; }
+  #scrubBar {
+    width: 100%;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(255,255,255,0.3);
+    outline: none;
+  }
+  #scrubBar::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff;
+  }
+  #timeInfo {
+    display: flex; justify-content: space-between;
+    font-size: 11px; color: #ccc;
+    font-variant-numeric: tabular-nums;
+  }
+  #frameControls {
+    display: flex; justify-content: center; align-items: center;
+    gap: 14px;
+  }
+  .frameBtn {
+    padding: 8px 16px; border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.3);
+    background: rgba(0,0,0,0.5); color: #fff;
+    font-size: 13px; font-weight: 600;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .playPauseBtn {
+    padding: 8px 16px; border-radius: 16px;
+    border: 1px solid rgba(255,255,255,0.5);
+    background: rgba(255,255,255,0.15); color: #fff;
+    font-size: 13px; font-weight: 600;
+  }
 
   #playbackLabel {
     position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
@@ -122,7 +169,7 @@
   </div>
 
   <video id="liveView" autoplay playsinline muted style="display:none;"></video>
-  <video id="playback" playsinline loop style="display:none;"></video>
+  <video id="playback" playsinline style="display:none;"></video>
 
   <div id="topBar" style="display:none;">
     <div id="status"><span class="dot"></span><span id="statusText">Klar</span></div>
@@ -137,6 +184,20 @@
     <button class="speedBtn active" data-speed="0.25">0.25x</button>
     <button class="speedBtn" data-speed="0.1">0.1x</button>
     <button class="speedBtn" data-speed="0.05">0.05x</button>
+  </div>
+
+  <div id="scrubWrap">
+    <div id="frameControls">
+      <button class="frameBtn" id="prevFrameBtn">⏮ frame</button>
+      <button class="playPauseBtn" id="playPauseBtn">⏸</button>
+      <button class="frameBtn" id="nextFrameBtn">frame ⏭</button>
+    </div>
+    <input type="range" id="scrubBar" min="0" max="1000" value="0" step="1">
+    <div id="timeInfo">
+      <span id="curTime">0:00.00</span>
+      <span id="frameNum">bilde 0</span>
+      <span id="durTime">0:00.00</span>
+    </div>
   </div>
 
   <div id="bottomBar" style="display:none;">
@@ -169,38 +230,65 @@ let recordedBlob = null;
 let recordedUrl = null;
 let isRecording = false;
 let viewingPlayback = false;
+let actualFps = 30; // brukes til frame-stepping, oppdateres når kamera starter
+
+// Prøver høyest fps først, faller nedover til noe funker.
+// De fleste iPhone-nettlesere vil ende på 30 eller 60 uansett — det er en
+// OS-begrensning i Safari/WebKit, ikke noe som kan omgås med kode.
+const FPS_ATTEMPTS = [240, 120, 60, 30];
 
 async function startCamera() {
-  placeholder.querySelector('#placeholderText') && (document.getElementById('placeholderText').textContent = 'Ber om kameratilgang...');
-  try {
-    // Prøv å be om høyest mulig bildefrekvens for best sakte-film-resultat
-    const constraints = {
-      audio: false,
-      video: {
-        facingMode: { ideal: 'environment' },
-        frameRate: { ideal: 120, min: 30 },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 }
-      }
-    };
-    stream = await navigator.mediaDevices.getUserMedia(constraints);
+  document.getElementById('placeholderText').textContent = 'Ber om kameratilgang...';
 
-    liveView.srcObject = stream;
-    liveView.style.display = 'block';
-    placeholder.style.display = 'none';
-    topBar.style.display = 'flex';
-    bottomBar.style.display = 'flex';
-
-    const track = stream.getVideoTracks()[0];
-    const settings = track.getSettings();
-    const actualFps = settings.frameRate ? Math.round(settings.frameRate) : '?';
-    fpsInfo.textContent = actualFps + ' fps';
-
-    statusText.textContent = 'Klar til opptak';
-  } catch (err) {
-    document.getElementById('placeholderText').textContent =
-      'Fikk ikke tilgang til kamera: ' + err.message;
+  for (const targetFps of FPS_ATTEMPTS) {
+    try {
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          frameRate: { exact: targetFps },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      };
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      break; // funket, gå videre
+    } catch (err) {
+      stream = null; // prøv neste fps i lista
+    }
   }
+
+  // Siste fallback: ingen exact frameRate-krav i det hele tatt,
+  // la nettleseren velge selv
+  if (!stream) {
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
+        }
+      });
+    } catch (err) {
+      document.getElementById('placeholderText').textContent =
+        'Fikk ikke tilgang til kamera: ' + err.message;
+      return;
+    }
+  }
+
+  liveView.srcObject = stream;
+  liveView.style.display = 'block';
+  placeholder.style.display = 'none';
+  topBar.style.display = 'flex';
+  bottomBar.style.display = 'flex';
+
+  const track = stream.getVideoTracks()[0];
+  const settings = track.getSettings();
+  actualFps = settings.frameRate ? Math.round(settings.frameRate) : 30;
+  fpsInfo.textContent = actualFps + ' fps';
+
+  statusText.textContent = 'Klar til opptak';
 }
 
 startCamBtn.addEventListener('click', startCamera);
@@ -262,19 +350,85 @@ shutterBtn.addEventListener('click', () => {
   }
 });
 
+const scrubWrap = document.getElementById('scrubWrap');
+const scrubBar = document.getElementById('scrubBar');
+const curTimeEl = document.getElementById('curTime');
+const durTimeEl = document.getElementById('durTime');
+const frameNumEl = document.getElementById('frameNum');
+const prevFrameBtn = document.getElementById('prevFrameBtn');
+const nextFrameBtn = document.getElementById('nextFrameBtn');
+const playPauseBtn = document.getElementById('playPauseBtn');
+
+function fmtTime(t) {
+  if (!isFinite(t)) return '0:00.00';
+  const m = Math.floor(t / 60);
+  const s = (t % 60).toFixed(2).padStart(5, '0');
+  return `${m}:${s}`;
+}
+
+function frameTimeStep() {
+  // Lengden på ett enkelt-bilde basert på fps kameraet faktisk klarte
+  return 1 / (actualFps || 30);
+}
+
+function updateScrubUI() {
+  if (!playback.duration || !isFinite(playback.duration)) return;
+  const pct = (playback.currentTime / playback.duration) * 1000;
+  scrubBar.value = pct;
+  curTimeEl.textContent = fmtTime(playback.currentTime);
+  durTimeEl.textContent = fmtTime(playback.duration);
+  frameNumEl.textContent = 'bilde ' + Math.round(playback.currentTime / frameTimeStep());
+}
+
+playback.addEventListener('timeupdate', updateScrubUI);
+playback.addEventListener('loadedmetadata', updateScrubUI);
+
+scrubBar.addEventListener('input', () => {
+  if (!playback.duration) return;
+  playback.pause();
+  playPauseBtn.textContent = '▶️';
+  const t = (scrubBar.value / 1000) * playback.duration;
+  playback.currentTime = t;
+});
+
+function stepFrame(direction) {
+  playback.pause();
+  playPauseBtn.textContent = '▶️';
+  const step = frameTimeStep() * direction;
+  let newTime = playback.currentTime + step;
+  newTime = Math.max(0, Math.min(playback.duration || newTime, newTime));
+  playback.currentTime = newTime;
+}
+
+prevFrameBtn.addEventListener('click', () => stepFrame(-1));
+nextFrameBtn.addEventListener('click', () => stepFrame(1));
+
+playPauseBtn.addEventListener('click', () => {
+  if (playback.paused) {
+    playback.play();
+    playPauseBtn.textContent = '⏸';
+  } else {
+    playback.pause();
+    playPauseBtn.textContent = '▶️';
+  }
+});
+
 function showPlayback() {
   if (!recordedUrl) return;
   viewingPlayback = true;
   liveView.style.display = 'none';
+  playback.loop = false;
   playback.src = recordedUrl;
   playback.style.display = 'block';
   playbackLabel.style.display = 'block';
   speedControls.classList.add('show');
+  scrubWrap.classList.add('show');
   playback.playbackRate = parseFloat(
     document.querySelector('.speedBtn.active')?.dataset.speed || '0.25'
   );
   playback.currentTime = 0;
   playback.play();
+  playPauseBtn.textContent = '⏸';
   shutterBtn.style.visibility = 'hidden';
   statusText.textContent = 'Ser på opptak';
 }
@@ -285,6 +439,7 @@ function hidePlayback() {
   playback.style.display = 'none';
   playbackLabel.style.display = 'none';
   speedControls.classList.remove('show');
+  scrubWrap.classList.remove('show');
   liveView.style.display = 'block';
   shutterBtn.style.visibility = 'visible';
   statusText.textContent = 'Klar til opptak';
